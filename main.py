@@ -411,6 +411,7 @@ class Repository:
     def checkout(self, branch:str, create_branch: bool):
         previous_branch = self.get_current_branch()
         files_to_clear = set()
+        previous_commit_hash=None
         try:
             previous_commit_hash = self.get_branch_commit(previous_branch)
             if previous_commit_hash:
@@ -454,8 +455,11 @@ class Repository:
             file_path = path / name
             if mode.startswith("100"):
                 blob_obj = self.load_object(obj_hash)
-                blob = Blob(blob_obj.content)
-                file_path.write_bytes(blob.content)
+                # blob = Blob(blob_obj.content)
+                # no need to wrap it again 
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+                # to make sure parent directories exist
+                file_path.write_bytes(blob_obj.content)
             elif mode.startswith("400"):
                 file_path.mkdir(exist_ok=True)
                 self.restore_tree(
@@ -477,11 +481,6 @@ class Repository:
             try:
                 if file_path.is_file():
                     file_path.unlink()
-                    
-                # for removing empty directory 
-                # elif file_path.is_dir():
-                #     if not any(file_path.iterdir()):
-                #       file_path.rmdir()
             except Exception:
                 pass
         target_commit_obj = self.load_object(target_commit_hash)
@@ -491,7 +490,158 @@ class Repository:
             self.restore_tree(target_commit.tree_hash,self.path)
         
         self.save_index({})
+    
+    def get_commit_files(self) -> Dict[str, str]:
+
+        current_branch = self.get_current_branch()
+
+        commit_hash = self.get_branch_commit(current_branch)
+
+        if not commit_hash:
+            return {}
+
+        commit_obj = self.load_object(commit_hash)
+
+        commit = Commit.from_content(commit_obj.content)
+
+        files = {}
+
+        def walk_tree(tree_hash, prefix=""):
+
+            tree_obj = self.load_object(tree_hash)
+
+            tree = Tree.from_content(tree_obj.content)
+
+            for mode, name, obj_hash in tree.entries:
+
+                full_name = f"{prefix}{name}"
+
+                if mode.startswith("100"):
+                    files[full_name] = obj_hash
+
+                elif mode.startswith("400"):
+                    walk_tree(obj_hash, full_name + "/")
+
+        walk_tree(commit.tree_hash)
+
+        return files
             
+    def status(self):
+
+        index = self.load_index()
+
+        committed = self.get_commit_files()
+
+        staged = []
+        modified = []
+        untracked = []
+        
+        # staged files 
+        for path, blob_hash in index.items():
+
+            if path not in committed:
+                staged.append(path)
+
+            elif committed[path] != blob_hash:
+                staged.append(path)
+
+        # working directory 
+        for file_path in self.path.rglob("*"):
+
+            if not file_path.is_file():
+                continue
+
+            if ".pygit" in file_path.parts or ".git" in file_path.parts:
+                continue
+
+            rel_path = str(file_path.relative_to(self.path))
+
+            content = file_path.read_bytes()
+
+            working_hash = Blob(content).hash()
+
+            # tracked in index
+            if rel_path in index:
+
+                # modified after staging
+                if index[rel_path] != working_hash:
+                    modified.append(rel_path)
+
+            # tracked only in commit
+            elif rel_path in committed:
+
+                # modified but unstaged
+                if committed[rel_path] != working_hash:
+                    modified.append(rel_path)
+
+            # completely unknown file
+            else:
+                untracked.append(rel_path)
+
+        # output 
+        print("\n=== STATUS ===\n")
+
+        if staged:
+            print("Changes to be committed:")
+
+            for f in staged:
+                print(f"    staged: {f}")
+
+            print()
+
+        if modified:
+            print("Changes not staged:")
+
+            for f in modified:
+                print(f"    modified: {f}")
+
+        print()
+
+        if untracked:
+            print("Untracked files:")
+
+            for f in untracked:
+                print(f"    {f}")
+
+            print()
+
+        if not staged and not modified and not untracked:
+            print("Working tree clean")
+
+    def log(self,oneline=False):
+
+        current_branch = self.get_current_branch()
+        commit_hash = self.get_branch_commit(current_branch)
+
+        if not commit_hash:
+            print("No commits yet")
+            return 
+
+        while commit_hash:
+            commit_obj = self.load_object(commit_hash)
+            commit = Commit.from_content(commit_obj.content)
+
+
+            if oneline:
+                print(f"{commit_hash[:7]} {commit.message}")
+            else:
+                print(f"\ncommit {commit_hash}")
+                print(f"Author: {commit.author}")
+
+                readable_time = time.strftime(
+                    "%Y-%m-%d %H:%M:%S",
+                    time.localtime(commit.timestamp)
+                )
+
+                print(f"Date: {readable_time}")
+
+                print(f"\n    {commit.message}\n")
+
+            if commit.parent_hashes:
+                commit_hash = commit.parent_hashes[0]
+            else:
+                break
+
 def main():
     parser = argparse.ArgumentParser(
         description="PyGit - A simpe git clone!")
@@ -528,6 +678,26 @@ def main():
         action="store_true",
         help="Create and switch to a new branch",
     )
+
+    # status command
+    status_parser = subparsers.add_parser(
+        "status",
+        help = "Show repository status"
+    )
+
+
+    # log parser 
+    log_parser = subparsers.add_parser(
+        "log",
+        help = "Show commit history"
+    )
+
+    log_parser.add_argument(
+        "--oneline",
+        action="store_true",
+        help="Show compact log format"
+    )
+
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
@@ -557,9 +727,21 @@ def main():
                 print("Not a git repository")
                 return 
             repo.checkout(args.branch,args.create_branch)
+
+        elif args.command == "status":
+            if not repo.git_dir.exists():
+                print("Not a git repository")
+                return 
+            repo.status()
+        
+        elif args.command == "log":
+            if not repo.git_dir.exists():
+                print("Not a git repository")
+                return 
+            repo.log(args.oneline)
     except Exception as e:
         print(f"Error: {e}")
         sys.exit(1)
-    print(args)
+    # print(args)
     
 main()
