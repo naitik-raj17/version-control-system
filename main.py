@@ -7,6 +7,7 @@ import hashlib
 import zlib
 import time
 from typing import Dict,List,Tuple,Optional
+from rich import print
 
 class GitObject:
     def __init__(self,obj_type:str,content:bytes):
@@ -608,11 +609,11 @@ class Repository:
         if not staged and not modified and not untracked:
             print("Working tree clean")
 
-    def log(self,oneline=False):
+    def log(self,oneline=False,graph=False):
 
         current_branch = self.get_current_branch()
         commit_hash = self.get_branch_commit(current_branch)
-
+        branches = self.get_all_branches()
         if not commit_hash:
             print("No commits yet")
             return 
@@ -622,10 +623,37 @@ class Repository:
             commit = Commit.from_content(commit_obj.content)
 
 
+            labels = []
+
+            for name, hash_ in branches.items():
+
+                if hash_ == commit_hash:
+                    labels.append(name)
+
+            label_text = ""
+
+            if labels:
+                label_text = f" ({', '.join(labels)})"
+
+            prefix = ""
+
+            if graph:
+                prefix = "* "
+
             if oneline:
-                print(f"{commit_hash[:7]} {commit.message}")
+                print(
+                    f"[green]{prefix}[/green]"
+                    f"[yellow]{commit_hash[:7]}[/yellow] "
+                    f"[white]{commit.message}[/white]"
+                    f"[red]{label_text}[/red]"
+                )
             else:
+
                 print(f"\ncommit {commit_hash}")
+
+                if labels:
+                    print(f"Branches: {', '.join(labels)}")
+
                 print(f"Author: {commit.author}")
 
                 readable_time = time.strftime(
@@ -636,12 +664,19 @@ class Repository:
                 print(f"Date: {readable_time}")
 
                 print(f"\n    {commit.message}\n")
-
             if commit.parent_hashes:
                 commit_hash = commit.parent_hashes[0]
             else:
                 break
+    
+    def get_all_branches(self):
+        branches = {}
 
+        for branch in self.heads_dir.iterdir():
+            if branch.is_file():
+                branches[branch.name]=branch.read_text().strip()
+        
+        return branches
 def main():
     parser = argparse.ArgumentParser(
         description="PyGit - A simpe git clone!")
@@ -698,6 +733,15 @@ def main():
         help="Show compact log format"
     )
 
+    log_parser.add_argument(
+        "--graph",
+        action="store_true",
+        help="Show commit graph"
+    )
+
+    
+
+
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
@@ -738,7 +782,7 @@ def main():
             if not repo.git_dir.exists():
                 print("Not a git repository")
                 return 
-            repo.log(args.oneline)
+            repo.log(args.oneline,args.graph)
     except Exception as e:
         print(f"Error: {e}")
         sys.exit(1)
